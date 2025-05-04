@@ -35,7 +35,17 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
+// Block Select: 0x00 = Common Register
+// RWB: 1 = Write, 0 = Read
+// OM: 01 = VDM mode (固定地址模式)
+#define W5500_CB_READ   0x00 | (0 << 2) | (0 << 0)  // 0x00
+#define W5500_CB_WRITE  0x00 | (1 << 2) | (1 << 0)  // 0x04 | 0x01 = 0x05
+// Socket類型定義（對應 W5500 控制暫存器的值）
+#define SOCK_STREAM     0x01  // TCP
+#define SOCK_DGRAM      0x02  // UDP
+#define SOCK_RAW        0x03  // Raw IP
+#define SOCK_MACRAW     0x04  // MAC Raw
+#define SOCK_PPPOE      0x05  // PPPoE
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -68,7 +78,10 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
-
+  uint8_t gateway[4] = {192, 168, 0, 1};
+  uint8_t subnet[4]  = {255, 255, 255, 0};
+  uint8_t ip[4]      = {192, 168, 0, 20};
+  uint8_t mac[6]     = {0x00, 0x08, 0xDC, 0x12, 0x34, 0x56};
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -76,7 +89,7 @@ int main(void)
   /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
 
-  /* USER CODE BEGIN Init */
+  /* USER CODE BEGIN Init */                                                   // 等 W5500 啟動穩定
 
   /* USER CODE END Init */
 
@@ -93,7 +106,31 @@ int main(void)
   MX_SPI1_Init();
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
-
+  HAL_Delay(500);
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_RESET);  // RESET 腳拉低（請換成你實際接的腳位）
+  HAL_Delay(100);
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_SET);    // 拉高解除 RESET
+  HAL_Delay(300);  // 等 W5500 穩定
+  // 參數寫入 W5500 的暫存器
+  W5500_WriteRegister(0x0009, W5500_CB_WRITE, mac, 6);     
+  W5500_WriteRegister(0x0001, W5500_CB_WRITE, gateway, 4); 
+  W5500_WriteRegister(0x0005, W5500_CB_WRITE, subnet, 4);  
+  W5500_WriteRegister(0x000F, W5500_CB_WRITE, ip, 4);      
+  printf("W5500 IP/GW/Subnet 設定完成\r\n");
+  uint8_t check_ip[4];
+  W5500_ReadRegister(0x000F, W5500_CB_READ, check_ip, 4);
+  printf("W5500 IP: %d.%d.%d.%d\r\n", check_ip[0], check_ip[1], check_ip[2], check_ip[3]);
+  // 開啟 UDP Socket 0，綁定 port 5000
+  uint8_t sock_num = 0;
+  uint16_t port = 5000;
+  if (socket(sock_num, SOCK_DGRAM, port) != 0) {
+    printf("socket() open failed\r\n");
+  } else {
+    printf("socket open on port %d\r\n", port);
+  }
+  uint8_t rx_buf[64];
+  uint8_t sender_ip[4];
+  uint16_t sender_port;
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -104,10 +141,52 @@ int main(void)
   HAL_ADC_Start(&hadc1);
   HAL_ADC_PollForConversion(&hadc1, HAL_MAX_DELAY);
   uint16_t raw = HAL_ADC_GetValue(&hadc1);
-  float voltage = (float)raw / 4095.0 * 3.3;  // 單位：V
-  float temperature_C = voltage * 10.0;      // LM35 每 10mV = 1°C
+  float voltage = (float)raw / 4095.0 * 3.3; // 單位：V
+  float temperature_C = voltage * 10.0; // LM35 每 10mV = 1°C
   printf("ADC raw: %u, voltage: %.2f V, temperature: %.2f °C\r\n", raw, voltage, temperature_C);
-  HAL_Delay(1000);
+  HAL_Delay(500);
+  //--------------------------
+  uint8_t version;
+  if (W5500_ReadRegister(0x0039, W5500_CB_READ, &version) == 0)
+  {
+    printf("W5500 VERSIONR: 0x%02X\r\n", version);
+  }
+  else
+  {
+    printf("Failed to read VERSIONR.\r\n");
+  }
+  HAL_Delay(500);
+  //--------------------------
+  W5500_ReadRegister(0x000F, W5500_CB_READ, check_ip, 4);
+  printf("W5500 IP: %d.%d.%d.%d\r\n", check_ip[0], check_ip[1], check_ip[2], check_ip[3]);
+  HAL_Delay(500);
+  uint8_t phycfgr;
+  if (W5500_ReadRegister(0x002E, W5500_CB_READ, &phycfgr) == 0)
+  {
+    printf("PHYCFGR: 0x%02X\r\n", phycfgr);
+    if (phycfgr & 0x01)
+      printf("網路已連線 (PHY Link Up)\r\n");
+    else
+      printf("網路未連線 (PHY Link Down)\r\n");
+  }
+  else
+  {
+    printf("無法讀取 PHYCFGR，請檢查 SPI 連接\r\n");
+  }
+  HAL_Delay(500);
+  W5500_Test_ReadVersion();
+  HAL_Delay(500);
+  printf("準備呼叫 recvfrom()\r\n");
+  int len = recvfrom(sock_num, rx_buf, sizeof(rx_buf), sender_ip, &sender_port);
+  printf("recvfrom() 回傳長度: %d\r\n", len);
+
+  if (len > 0) {
+  printf("收到 %d bytes from %d.%d.%d.%d:%d\r\n", len, sender_ip[0], sender_ip[1], sender_ip[2], sender_ip[3], sender_port);
+  printf("準備回傳 echo...\r\n");
+  sendto(sock_num, rx_buf, len, sender_ip, sender_port);
+  printf("傳輸 %d bytes from %d.%d.%d.%d:%d\r\n", len, sender_ip[0], sender_ip[1], sender_ip[2], sender_ip[3], sender_port);
+  }
+
   /* USER CODE BEGIN 3 */
   }
   /* USER CODE END 3 */
